@@ -1,0 +1,3 @@
+CREATE DATABASE LocalDeliveryMarketplace_Team_105;
+GO
+USE LocalDeliveryMarketplace_Team_105;
