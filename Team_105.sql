@@ -1065,7 +1065,7 @@ as begin
     begin try
     begin transaction;
         update Users set account_status = 'Active' where user_id = @customer_id;
-        delete from Blaclist where customer_id=@customer_id;
+        delete from Blacklist where customer_id=@customer_id;
     commit transaction;
     end try
     begin catch
