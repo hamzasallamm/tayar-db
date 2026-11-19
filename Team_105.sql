@@ -345,6 +345,8 @@ BEGIN
     DROP VIEW RiderPerformanceSummary;
     DROP VIEW TopSellingProducts;
     DROP VIEW ZoneDeliveryPerformance;
+    DROP VIEW Customer_Ordered_Items;
+    DROP VIEW Zone_Avg_Delivery_Time;
 
     DROP FUNCTION CustomerLoginValidation;
     DROP FUNCTION PartnerLoginValidation;
@@ -438,6 +440,28 @@ GO
 EXEC createAllTables;
 GO
 
+-- Student 2: Karim Salah (64-13699)
+CREATE VIEW allBusinessProfiles
+AS
+SELECT
+    B.business_id,
+    B.name AS business_name,
+    CASE
+        WHEN R.business_id IS NOT NULL THEN 'Restaurant'
+        WHEN P.business_id IS NOT NULL THEN 'Pharmacy'
+    END AS business_type,
+    Z.zone_name,
+    U.first_name + ' ' + U.last_name AS partner_name,
+    B.status,
+    B.opening_hour,
+    B.closing_hour
+FROM Business B
+INNER JOIN Zone Z ON Z.zone_id = B.zone_id
+INNER JOIN Users U ON U.user_id = B.partner_id
+LEFT OUTER JOIN Restaurant R ON R.business_id = B.business_id
+LEFT OUTER JOIN Pharmacy P ON P.business_id = B.business_id;
+GO
+
 -- Student 4: Youssef Elbeltagy (64-12228)
 CREATE VIEW BusinessesPerZone
 AS
@@ -457,6 +481,34 @@ create view ActiveVouchers as
 select v.voucher_id, v.promo_code, v.customer_id, v.is_percentage, v.amount, v.expiry_date
 from Voucher v
 where v.status = 'Unused' and v.expiry_date >= cast(getdate() as date);
+GO
+
+-- Student 2: Karim Salah (64-13699)
+CREATE VIEW PendingBusinessApprovals
+AS
+SELECT business_id, business_name, business_type, zone_name, partner_name
+FROM allBusinessProfiles
+WHERE status = 'Pending';
+GO
+
+-- Student 2: Karim Salah (64-13699)
+CREATE VIEW TopSellingProducts
+AS
+SELECT TOP 10
+    P.product_id,
+    P.name AS product_name,
+    A.business_name,
+    A.business_type,
+    SUM(CI.quantity) AS units_sold,
+    CAST(SUM(CI.quantity * CI.unit_price) AS DECIMAL(10,2)) AS total_revenue
+FROM CartItem CI
+INNER JOIN Product P ON P.product_id = CI.product_id
+INNER JOIN Orders O ON O.cart_id = CI.cart_id
+INNER JOIN SubOrder S ON S.order_id = O.order_id AND S.business_id = P.business_id
+INNER JOIN allBusinessProfiles A ON A.business_id = P.business_id
+WHERE S.status <> 'Cancelled'
+GROUP BY P.product_id, P.name, A.business_name, A.business_type
+ORDER BY units_sold DESC, P.product_id;
 GO
 
 -- Student 1: Hamza Sallam (64-5469)
@@ -1194,5 +1246,1054 @@ RETURN
     GROUP BY
         Z.zone_name,
         CASE WHEN R.business_id IS NULL THEN 'Pharmacy' ELSE 'Restaurant' END
+);
+GO
+
+-- Student 2: Karim Salah (64-13699)
+CREATE PROCEDURE Register_Business
+    @partner_id INT,
+    @name VARCHAR(100),
+    @description VARCHAR(255),
+    @link_website VARCHAR(255),
+    @zone_id INT,
+    @opening_hour TIME,
+    @closing_hour TIME,
+    @expected_delivery_time INT,
+    @phone CHAR(11),
+    @business_type VARCHAR(20),
+    @cuisine_type VARCHAR(50),
+    @food_category VARCHAR(50),
+    @pharmacy_type VARCHAR(50)
+AS
+BEGIN
+    DECLARE @business_id INT;
+
+    IF @name IS NULL OR @name = ''
+       OR @opening_hour IS NULL OR @closing_hour IS NULL
+       OR @expected_delivery_time IS NULL OR @expected_delivery_time <= 0
+       OR @phone IS NULL OR LEN(@phone) <> 11 OR @phone LIKE '%[^0-9]%'
+       OR @business_type IS NULL OR @business_type NOT IN ('Restaurant', 'Pharmacy')
+        RETURN -1;
+
+    IF @business_type = 'Restaurant'
+       AND (@cuisine_type IS NULL OR @cuisine_type = '' OR @food_category IS NULL OR @food_category = '')
+        RETURN -1;
+
+    IF @business_type = 'Pharmacy' AND (@pharmacy_type IS NULL OR @pharmacy_type = '')
+        RETURN -1;
+
+    IF NOT EXISTS (SELECT 1 FROM Zone WHERE zone_id = @zone_id)
+        RETURN -1;
+
+    IF NOT EXISTS (SELECT 1 FROM Partner WHERE partner_id = @partner_id)
+        RETURN -3;
+
+    IF EXISTS (SELECT 1 FROM Business WHERE partner_id = @partner_id AND status <> 'Rejected')
+        RETURN -2;
+
+    SELECT @business_id = business_id FROM Business WHERE partner_id = @partner_id;
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        IF @business_id IS NULL
+        BEGIN
+            INSERT INTO Business (name, description, link_website, opening_hour, closing_hour,
+                                  expected_delivery_time, partner_id, zone_id)
+            VALUES (@name, @description, @link_website, @opening_hour, @closing_hour,
+                    @expected_delivery_time, @partner_id, @zone_id);
+
+            SELECT @business_id = business_id FROM Business WHERE partner_id = @partner_id;
+        END
+        ELSE
+        BEGIN
+            UPDATE Business
+            SET name = @name,
+                description = @description,
+                link_website = @link_website,
+                opening_hour = @opening_hour,
+                closing_hour = @closing_hour,
+                expected_delivery_time = @expected_delivery_time,
+                status = 'Pending',
+                suspension_reason = NULL,
+                zone_id = @zone_id
+            WHERE business_id = @business_id;
+
+            DELETE FROM Business_Phone WHERE business_id = @business_id;
+            DELETE FROM Restaurant WHERE business_id = @business_id;
+            DELETE FROM Pharmacy WHERE business_id = @business_id;
+        END;
+
+        INSERT INTO Business_Phone (business_id, phone)
+        VALUES (@business_id, @phone);
+
+        IF @business_type = 'Restaurant'
+            INSERT INTO Restaurant (business_id, cuisine_type, food_category)
+            VALUES (@business_id, @cuisine_type, @food_category);
+        ELSE
+            INSERT INTO Pharmacy (business_id, pharmacy_type)
+            VALUES (@business_id, @pharmacy_type);
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        ROLLBACK TRANSACTION;
+        RETURN -1;
+    END CATCH;
+
+    RETURN 0;
+END;
+GO
+
+-- Student 2: Karim Salah (64-13699)
+CREATE PROCEDURE Update_Business_Info
+    @business_id INT,
+    @opening_hour TIME,
+    @closing_hour TIME,
+    @phone CHAR(11),
+    @link_website VARCHAR(255)
+AS
+BEGIN
+    IF @opening_hour IS NULL OR @closing_hour IS NULL
+        RETURN -1;
+
+    IF @phone IS NOT NULL AND (LEN(@phone) <> 11 OR @phone LIKE '%[^0-9]%')
+        RETURN -1;
+
+    IF EXISTS (SELECT 1 FROM Business_Phone WHERE business_id = @business_id AND phone = @phone)
+        RETURN -2;
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        UPDATE Business
+        SET opening_hour = @opening_hour,
+            closing_hour = @closing_hour,
+            link_website = @link_website
+        WHERE business_id = @business_id;
+
+        IF @phone IS NOT NULL
+            INSERT INTO Business_Phone (business_id, phone)
+            VALUES (@business_id, @phone);
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        ROLLBACK TRANSACTION;
+        RETURN -1;
+    END CATCH;
+
+    RETURN 0;
+END;
+GO
+
+-- Student 2: Karim Salah (64-13699)
+CREATE PROCEDURE Upsert_Product
+    @business_id INT,
+    @product_id INT,
+    @name VARCHAR(100),
+    @description VARCHAR(255),
+    @category VARCHAR(50),
+    @price DECIMAL(10,2),
+    @is_available BIT
+AS
+BEGIN
+    IF @name IS NULL OR @name = ''
+       OR @category IS NULL OR @category = ''
+       OR @price IS NULL OR @price <= 0
+       OR @is_available IS NULL
+        RETURN -1;
+
+    IF EXISTS (SELECT 1 FROM Business WHERE business_id = @business_id AND status = 'Suspended')
+        RETURN -4;
+
+    IF @product_id IS NULL
+    BEGIN
+        INSERT INTO Product (name, description, category, price, is_available, business_id)
+        VALUES (@name, @description, @category, @price, @is_available, @business_id);
+        RETURN 0;
+    END;
+
+    IF NOT EXISTS (SELECT 1 FROM Product WHERE product_id = @product_id AND business_id = @business_id)
+        RETURN -3;
+
+    IF EXISTS (SELECT 1 FROM Product WHERE product_id = @product_id AND discount_amount > 0.5 * @price)
+        RETURN -1;
+
+    UPDATE Product
+    SET name = @name,
+        description = @description,
+        category = @category,
+        price = @price,
+        is_available = @is_available
+    WHERE product_id = @product_id;
+
+    RETURN 0;
+END;
+GO
+
+-- Student 2: Karim Salah (64-13699)
+CREATE PROCEDURE Toggle_Product_Status
+    @product_id INT,
+    @is_available BIT
+AS
+BEGIN
+    IF @is_available IS NULL
+        RETURN -1;
+
+    IF @is_available = 1 AND EXISTS
+    (
+        SELECT 1
+        FROM Product P
+        INNER JOIN Business B ON B.business_id = P.business_id
+        WHERE P.product_id = @product_id AND B.status = 'Suspended'
+    )
+        RETURN -4;
+
+    UPDATE Product SET is_available = @is_available WHERE product_id = @product_id;
+
+    RETURN 0;
+END;
+GO
+
+-- Student 2: Karim Salah (64-13699)
+CREATE PROCEDURE Set_Product_Promotion
+    @product_id INT,
+    @discount_amount DECIMAL(10,2)
+AS
+BEGIN
+    IF @discount_amount IS NULL OR @discount_amount < 0
+        RETURN -1;
+
+    IF EXISTS (SELECT 1 FROM Product WHERE product_id = @product_id AND @discount_amount > 0.5 * price)
+        RETURN -1;
+
+    UPDATE Product SET discount_amount = @discount_amount WHERE product_id = @product_id;
+
+    RETURN 0;
+END;
+GO
+
+-- Student 2: Karim Salah (64-13699)
+CREATE FUNCTION dbo.BusinessSalesReport (@business_id INT, @from_date DATE, @to_date DATE)
+RETURNS TABLE
+AS
+RETURN
+(
+    SELECT
+        P.product_id,
+        P.name AS product_name,
+        SUM(CI.quantity) AS units_sold,
+        CAST(SUM(CI.quantity * CI.unit_price) AS DECIMAL(10,2)) AS revenue_per_product
+    FROM CartItem CI
+    INNER JOIN Product P ON P.product_id = CI.product_id
+    INNER JOIN Orders O ON O.cart_id = CI.cart_id
+    INNER JOIN SubOrder S ON S.order_id = O.order_id AND S.business_id = P.business_id
+    WHERE P.business_id = @business_id
+      AND S.status <> 'Cancelled'
+      AND CAST(O.order_date AS DATE) BETWEEN @from_date AND @to_date
+    GROUP BY P.product_id, P.name
+);
+GO
+
+-- Student 3: Omar Mohamed (64-7954)
+CREATE PROCEDURE Add_Customer_Address
+    @customer_id INT,
+    @description VARCHAR(150),
+    @zone_id INT
+AS
+BEGIN
+    IF @description IS NULL OR @description = ''
+        RETURN -1;
+
+    IF NOT EXISTS (SELECT 1 FROM Zone WHERE zone_id = @zone_id)
+        RETURN -1;
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        UPDATE Address SET is_active = 0 WHERE customer_id = @customer_id;
+
+        INSERT INTO Address (description, is_active, customer_id, zone_id)
+        VALUES (@description, 1, @customer_id, @zone_id);
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        ROLLBACK TRANSACTION;
+        RETURN -1;
+    END CATCH;
+
+    RETURN 0;
+END;
+GO
+
+-- Student 3: Omar Mohamed (64-7954)
+CREATE PROCEDURE Update_Delete_Customer_Address
+    @customer_id INT,
+    @address_id INT,
+    @description VARCHAR(150),
+    @zone_id INT,
+    @action VARCHAR(20)
+AS
+BEGIN
+    IF @action IS NULL OR @action NOT IN ('Update', 'Delete')
+        RETURN -1;
+
+    IF NOT EXISTS (SELECT 1 FROM Address WHERE address_id = @address_id AND customer_id = @customer_id)
+        RETURN -3;
+
+    IF EXISTS
+    (
+        SELECT 1
+        FROM Orders O
+        INNER JOIN Cart C ON C.cart_id = O.cart_id
+        WHERE C.address_id = @address_id AND O.status IN ('Placed', 'In Progress')
+    )
+        RETURN -4;
+
+    IF @action = 'Update'
+    BEGIN
+        IF @description IS NULL OR @description = ''
+            RETURN -1;
+
+        IF NOT EXISTS (SELECT 1 FROM Zone WHERE zone_id = @zone_id)
+            RETURN -1;
+
+        UPDATE Address
+        SET description = @description,
+            zone_id = @zone_id
+        WHERE address_id = @address_id;
+
+        RETURN 0;
+    END;
+
+    IF EXISTS (SELECT 1 FROM Cart WHERE address_id = @address_id)
+        RETURN -4;
+
+    IF EXISTS (SELECT 1 FROM Address WHERE address_id = @address_id AND is_active = 1)
+        RETURN -4;
+
+    DELETE FROM Address WHERE address_id = @address_id;
+
+    RETURN 0;
+END;
+GO
+
+-- Student 3: Omar Mohamed (64-7954)
+CREATE PROCEDURE Change_Active_Address
+    @customer_id INT,
+    @new_address_id INT
+AS
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM Address WHERE address_id = @new_address_id AND customer_id = @customer_id)
+        RETURN -3;
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        UPDATE Address SET is_active = 0 WHERE customer_id = @customer_id;
+        UPDATE Address SET is_active = 1 WHERE address_id = @new_address_id;
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        ROLLBACK TRANSACTION;
+        RETURN -1;
+    END CATCH;
+
+    RETURN 0;
+END;
+GO
+
+-- Student 3: Omar Mohamed (64-7954)
+CREATE PROCEDURE Add_Card
+    @customer_id INT,
+    @card_no CHAR(16),
+    @card_holder_name VARCHAR(100),
+    @expiration_date DATE
+AS
+BEGIN
+    IF @card_no IS NULL OR LEN(@card_no) <> 16 OR @card_no LIKE '%[^0-9]%'
+       OR @card_holder_name IS NULL OR @card_holder_name = ''
+       OR @expiration_date IS NULL OR @expiration_date < CAST(GETDATE() AS DATE)
+        RETURN -1;
+
+    IF EXISTS (SELECT 1 FROM Card WHERE customer_id = @customer_id AND card_no = @card_no)
+        RETURN -2;
+
+    INSERT INTO Card (card_no, card_holder_name, expiration_date, customer_id)
+    VALUES (@card_no, @card_holder_name, @expiration_date, @customer_id);
+
+    RETURN 0;
+END;
+GO
+
+-- Student 3: Omar Mohamed (64-7954)
+CREATE PROCEDURE Create_Cart
+    @customer_id INT
+AS
+BEGIN
+    DECLARE @address_id INT;
+
+    IF EXISTS (SELECT 1 FROM Users WHERE user_id = @customer_id AND account_status = 'Blacklisted')
+        RETURN -3;
+
+    SELECT @address_id = address_id
+    FROM Address
+    WHERE customer_id = @customer_id AND is_active = 1;
+
+    IF @address_id IS NULL
+        RETURN -1;
+
+    IF EXISTS (SELECT 1 FROM Cart WHERE address_id = @address_id AND status = 'Active')
+        RETURN -2;
+
+    INSERT INTO Cart (customer_id, address_id)
+    VALUES (@customer_id, @address_id);
+
+    RETURN 0;
+END;
+GO
+
+-- Student 3: Omar Mohamed (64-7954)
+CREATE PROCEDURE Add_To_Cart
+    @cart_id INT,
+    @product_id INT,
+    @quantity INT,
+    @notes VARCHAR(255)
+AS
+BEGIN
+    DECLARE @old_quantity INT;
+
+    IF @quantity IS NULL OR @quantity < 1
+        RETURN -1;
+
+    IF NOT EXISTS
+    (
+        SELECT 1
+        FROM Cart C
+        INNER JOIN Address A ON A.address_id = C.address_id
+        WHERE C.cart_id = @cart_id AND C.status = 'Active' AND A.is_active = 1
+    )
+        RETURN -4;
+
+    IF NOT EXISTS
+    (
+        SELECT 1
+        FROM Product P
+        INNER JOIN Business B ON B.business_id = P.business_id
+        WHERE P.product_id = @product_id AND P.is_available = 1 AND B.status = 'Active'
+    )
+        RETURN -4;
+
+    IF NOT EXISTS
+    (
+        SELECT 1
+        FROM Cart C
+        INNER JOIN Address A ON A.address_id = C.address_id
+        INNER JOIN Business B ON B.zone_id = A.zone_id
+        INNER JOIN Product P ON P.business_id = B.business_id
+        WHERE C.cart_id = @cart_id AND P.product_id = @product_id
+    )
+        RETURN -5;
+
+    SELECT @old_quantity = quantity
+    FROM CartItem
+    WHERE cart_id = @cart_id AND product_id = @product_id;
+
+    IF @old_quantity IS NULL
+        SET @old_quantity = 0;
+
+    IF @old_quantity + @quantity > 10
+        RETURN -6;
+
+    IF @old_quantity = 0
+        INSERT INTO CartItem (cart_id, product_id, quantity, notes)
+        VALUES (@cart_id, @product_id, @quantity, @notes);
+    ELSE
+        UPDATE CartItem
+        SET quantity = quantity + @quantity,
+            notes = CASE WHEN @notes IS NULL THEN notes ELSE @notes END
+        WHERE cart_id = @cart_id AND product_id = @product_id;
+
+    RETURN 0;
+END;
+GO
+
+-- Student 3: Omar Mohamed (64-7954)
+CREATE PROCEDURE Remove_From_Cart
+    @cart_id INT,
+    @product_id INT
+AS
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM Cart WHERE cart_id = @cart_id AND status = 'Active')
+        RETURN -4;
+
+    IF NOT EXISTS (SELECT 1 FROM CartItem WHERE cart_id = @cart_id AND product_id = @product_id)
+        RETURN -9;
+
+    DELETE FROM CartItem WHERE cart_id = @cart_id AND product_id = @product_id;
+
+    RETURN 0;
+END;
+GO
+
+-- Student 3: Omar Mohamed (64-7954)
+CREATE FUNCTION dbo.Calculate_Voucher_Discount (@voucher_id INT, @order_subtotal DECIMAL(10,2))
+RETURNS DECIMAL(10,2)
+AS
+BEGIN
+    DECLARE @is_percentage BIT;
+    DECLARE @amount DECIMAL(10,2);
+    DECLARE @discount DECIMAL(10,2);
+
+    IF @order_subtotal IS NULL OR @order_subtotal < 0
+        RETURN -1;
+
+    SELECT @is_percentage = is_percentage, @amount = amount
+    FROM Voucher
+    WHERE voucher_id = @voucher_id
+      AND status = 'Unused'
+      AND expiry_date >= CAST(GETDATE() AS DATE);
+
+    IF @amount IS NULL
+        RETURN 0;
+
+    IF @is_percentage = 1
+        SET @discount = @order_subtotal * @amount / 100;
+    ELSE
+        SET @discount = @amount;
+
+    IF @discount > @order_subtotal
+        SET @discount = @order_subtotal;
+
+    RETURN @discount;
+END;
+GO
+
+-- Student 3: Omar Mohamed (64-7954)
+CREATE PROCEDURE Checkout_Cart
+    @cart_id INT,
+    @voucher_id INT,
+    @payment_method VARCHAR(20),
+    @card_id INT
+AS
+BEGIN
+    DECLARE @customer_id INT;
+    DECLARE @address_id INT;
+    DECLARE @zone_id INT;
+    DECLARE @delivery_fee DECIMAL(10,2);
+    DECLARE @now TIME;
+    DECLARE @subtotal DECIMAL(10,2);
+    DECLARE @business_count INT;
+    DECLARE @discount DECIMAL(10,2);
+    DECLARE @total DECIMAL(10,2);
+    DECLARE @order_id INT;
+    DECLARE @suborder_id INT;
+    DECLARE @rider_id INT;
+
+    IF @payment_method IS NULL OR @payment_method NOT IN ('Cash', 'Card', 'Wallet')
+        RETURN -1;
+
+    IF NOT EXISTS (SELECT 1 FROM Cart WHERE cart_id = @cart_id AND status = 'Active')
+        RETURN -4;
+
+    IF NOT EXISTS (SELECT 1 FROM CartItem WHERE cart_id = @cart_id)
+        RETURN -9;
+
+    SELECT @customer_id = C.customer_id, @address_id = C.address_id, @zone_id = A.zone_id
+    FROM Cart C
+    INNER JOIN Address A ON A.address_id = C.address_id
+    WHERE C.cart_id = @cart_id;
+
+    IF EXISTS (SELECT 1 FROM Users WHERE user_id = @customer_id AND account_status = 'Blacklisted')
+        RETURN -3;
+
+    IF NOT EXISTS (SELECT 1 FROM Address WHERE address_id = @address_id AND is_active = 1)
+        RETURN -4;
+
+    -- every product must be available and its business Active (BR-5)
+    IF EXISTS
+    (
+        SELECT 1
+        FROM CartItem CI
+        INNER JOIN Product P ON P.product_id = CI.product_id
+        INNER JOIN Business B ON B.business_id = P.business_id
+        WHERE CI.cart_id = @cart_id AND (P.is_available = 0 OR B.status <> 'Active')
+    )
+        RETURN -4;
+
+    -- every business must be in the zone of the active address (BR-8)
+    IF EXISTS
+    (
+        SELECT 1
+        FROM CartItem CI
+        INNER JOIN Product P ON P.product_id = CI.product_id
+        INNER JOIN Business B ON B.business_id = P.business_id
+        WHERE CI.cart_id = @cart_id AND B.zone_id <> @zone_id
+    )
+        RETURN -5;
+
+    -- every business must be open now (BR-6)
+    SET @now = CAST(GETDATE() AS TIME);
+
+    IF EXISTS
+    (
+        SELECT 1
+        FROM CartItem CI
+        INNER JOIN Product P ON P.product_id = CI.product_id
+        INNER JOIN Business B ON B.business_id = P.business_id
+        WHERE CI.cart_id = @cart_id
+          AND NOT (B.opening_hour = B.closing_hour
+                   OR (B.opening_hour < B.closing_hour AND @now >= B.opening_hour AND @now < B.closing_hour)
+                   OR (B.opening_hour > B.closing_hour AND (@now >= B.opening_hour OR @now < B.closing_hour)))
+    )
+        RETURN -4;
+
+    -- the voucher must be the customer's, Unused and not expired (BR-13)
+    IF @voucher_id IS NOT NULL AND NOT EXISTS
+    (
+        SELECT 1
+        FROM Voucher
+        WHERE voucher_id = @voucher_id
+          AND customer_id = @customer_id
+          AND status = 'Unused'
+          AND expiry_date >= CAST(GETDATE() AS DATE)
+    )
+        RETURN -1;
+
+    -- prices (BR-9)
+    SELECT @subtotal = SUM(CI.quantity * (P.price - P.discount_amount)),
+           @business_count = COUNT(DISTINCT P.business_id)
+    FROM CartItem CI
+    INNER JOIN Product P ON P.product_id = CI.product_id
+    WHERE CI.cart_id = @cart_id;
+
+    SELECT @delivery_fee = delivery_fee FROM Zone WHERE zone_id = @zone_id;
+
+    SET @discount = dbo.Calculate_Voucher_Discount(@voucher_id, @subtotal);
+    SET @total = @subtotal + @business_count * @delivery_fee - @discount;
+
+    -- payment (BR-10)
+    IF @payment_method = 'Card' AND NOT EXISTS
+    (
+        SELECT 1
+        FROM Card
+        WHERE card_id = @card_id
+          AND customer_id = @customer_id
+          AND expiration_date >= CAST(GETDATE() AS DATE)
+    )
+        RETURN -7;
+
+    IF @payment_method = 'Wallet'
+       AND EXISTS (SELECT 1 FROM Customer WHERE customer_id = @customer_id AND wallet_balance < @total)
+        RETURN -7;
+
+    IF @payment_method <> 'Card'
+        SET @card_id = NULL;
+
+    -- the zone needs at least one available rider (BR-12)
+    IF NOT EXISTS
+    (
+        SELECT 1
+        FROM Rider R
+        INNER JOIN Users U ON U.user_id = R.rider_id
+        WHERE R.zone_id = @zone_id AND R.is_available = 1 AND U.account_status = 'Active'
+    )
+        RETURN -8;
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        -- freeze the effective unit prices
+        UPDATE CartItem
+        SET unit_price = (SELECT P.price - P.discount_amount FROM Product P WHERE P.product_id = CartItem.product_id)
+        WHERE cart_id = @cart_id;
+
+        INSERT INTO Orders (order_date, status, discount_amount, total_amount, cart_id, zone_id, voucher_id)
+        VALUES (GETDATE(), 'Placed', @discount, @total, @cart_id, @zone_id, @voucher_id);
+
+        SELECT @order_id = order_id FROM Orders WHERE cart_id = @cart_id;
+
+        -- one SubOrder per business
+        INSERT INTO SubOrder (status, total_price, delivery_fee, order_id, business_id)
+        SELECT 'Placed', SUM(CI.quantity * CI.unit_price), @delivery_fee, @order_id, P.business_id
+        FROM CartItem CI
+        INNER JOIN Product P ON P.product_id = CI.product_id
+        WHERE CI.cart_id = @cart_id
+        GROUP BY P.business_id;
+
+        IF @voucher_id IS NOT NULL
+            UPDATE Voucher SET status = 'Used' WHERE voucher_id = @voucher_id;
+
+        -- one Delivery per SubOrder, each given to the least-busy rider at that moment (BR-12)
+        SET @suborder_id = NULL;
+        SELECT TOP 1 @suborder_id = suborder_id
+        FROM SubOrder
+        WHERE order_id = @order_id AND status = 'Placed'
+        ORDER BY business_id;
+
+        WHILE @suborder_id IS NOT NULL
+        BEGIN
+            SELECT TOP 1 @rider_id = R.rider_id
+            FROM Rider R
+            INNER JOIN Users U ON U.user_id = R.rider_id
+            LEFT OUTER JOIN Delivery D ON D.rider_id = R.rider_id
+            LEFT OUTER JOIN SubOrder S ON S.suborder_id = D.suborder_id AND S.status IN ('Assigned', 'Picked Up')
+            WHERE R.zone_id = @zone_id AND R.is_available = 1 AND U.account_status = 'Active'
+            GROUP BY R.rider_id
+            ORDER BY COUNT(S.suborder_id), R.rider_id;
+
+            INSERT INTO Delivery (assigned_at, suborder_id, rider_id)
+            VALUES (GETDATE(), @suborder_id, @rider_id);
+
+            UPDATE SubOrder SET status = 'Assigned' WHERE suborder_id = @suborder_id;
+
+            SET @suborder_id = NULL;
+            SELECT TOP 1 @suborder_id = suborder_id
+            FROM SubOrder
+            WHERE order_id = @order_id AND status = 'Placed'
+            ORDER BY business_id;
+        END;
+
+        INSERT INTO Payment (amount, currency, method, transaction_date, refunded_amount, order_id, card_id)
+        VALUES (@total, 'EGP', @payment_method, GETDATE(), 0, @order_id, @card_id);
+
+        IF @payment_method = 'Wallet'
+            UPDATE Customer SET wallet_balance = wallet_balance - @total WHERE customer_id = @customer_id;
+
+        UPDATE Cart SET status = 'Checked Out' WHERE cart_id = @cart_id;
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        ROLLBACK TRANSACTION;
+        RETURN -1;
+    END CATCH;
+
+    RETURN 0;
+END;
+GO
+
+-- Student 3: Omar Mohamed (64-7954)
+CREATE PROCEDURE Cancel_Order
+    @order_id INT
+AS
+BEGIN
+    DECLARE @customer_id INT;
+    DECLARE @refund DECIMAL(10,2);
+    DECLARE @method VARCHAR(20);
+
+    IF EXISTS (SELECT 1 FROM Orders WHERE order_id = @order_id AND status = 'Cancelled')
+        RETURN -4;
+
+    IF EXISTS (SELECT 1 FROM SubOrder WHERE order_id = @order_id AND status IN ('Picked Up', 'Delivered'))
+        RETURN -4;
+
+    SELECT @customer_id = C.customer_id
+    FROM Orders O
+    INNER JOIN Cart C ON C.cart_id = O.cart_id
+    WHERE O.order_id = @order_id;
+
+    SELECT @refund = amount - refunded_amount, @method = method
+    FROM Payment
+    WHERE order_id = @order_id;
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        -- refund the remaining amount (BR-14)
+        IF @refund IS NOT NULL
+        BEGIN
+            UPDATE Payment SET refunded_amount = amount WHERE order_id = @order_id;
+
+            IF @method <> 'Cash'
+                UPDATE Customer SET wallet_balance = wallet_balance + @refund WHERE customer_id = @customer_id;
+        END;
+
+        UPDATE Voucher
+        SET status = 'Unused'
+        WHERE voucher_id IN (SELECT voucher_id FROM Orders WHERE order_id = @order_id);
+
+        UPDATE SubOrder SET status = 'Cancelled' WHERE order_id = @order_id;
+
+        UPDATE Orders
+        SET status = 'Cancelled',
+            voucher_id = NULL
+        WHERE order_id = @order_id;
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        ROLLBACK TRANSACTION;
+        RETURN -1;
+    END CATCH;
+
+    RETURN 0;
+END;
+GO
+
+-- Student 3: Omar Mohamed (64-7954)
+CREATE PROCEDURE Reorder
+    @order_id INT,
+    @address_id INT
+AS
+BEGIN
+    DECLARE @customer_id INT;
+    DECLARE @old_cart_id INT;
+    DECLARE @order_zone INT;
+    DECLARE @new_cart_id INT;
+
+    SELECT @customer_id = C.customer_id, @old_cart_id = C.cart_id, @order_zone = O.zone_id
+    FROM Orders O
+    INNER JOIN Cart C ON C.cart_id = O.cart_id
+    WHERE O.order_id = @order_id;
+
+    IF EXISTS (SELECT 1 FROM Users WHERE user_id = @customer_id AND account_status = 'Blacklisted')
+        RETURN -3;
+
+    IF NOT EXISTS (SELECT 1 FROM Address WHERE address_id = @address_id AND customer_id = @customer_id)
+        RETURN -3;
+
+    IF NOT EXISTS (SELECT 1 FROM Address WHERE address_id = @address_id AND zone_id = @order_zone)
+        RETURN -5;
+
+    IF EXISTS (SELECT 1 FROM Cart WHERE address_id = @address_id AND status = 'Active')
+        RETURN -2;
+
+    IF NOT EXISTS
+    (
+        SELECT 1
+        FROM CartItem CI
+        INNER JOIN Product P ON P.product_id = CI.product_id
+        INNER JOIN Business B ON B.business_id = P.business_id
+        WHERE CI.cart_id = @old_cart_id AND P.is_available = 1 AND B.status = 'Active'
+    )
+        RETURN -9;
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        UPDATE Address SET is_active = 0 WHERE customer_id = @customer_id;
+        UPDATE Address SET is_active = 1 WHERE address_id = @address_id;
+
+        INSERT INTO Cart (customer_id, address_id)
+        VALUES (@customer_id, @address_id);
+
+        SELECT @new_cart_id = cart_id
+        FROM Cart
+        WHERE address_id = @address_id AND status = 'Active';
+
+        -- copy only the products that can still be ordered
+        INSERT INTO CartItem (cart_id, product_id, quantity, notes)
+        SELECT @new_cart_id, CI.product_id, CI.quantity, CI.notes
+        FROM CartItem CI
+        INNER JOIN Product P ON P.product_id = CI.product_id
+        INNER JOIN Business B ON B.business_id = P.business_id
+        WHERE CI.cart_id = @old_cart_id AND P.is_available = 1 AND B.status = 'Active';
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        ROLLBACK TRANSACTION;
+        RETURN -1;
+    END CATCH;
+
+    RETURN 0;
+END;
+GO
+
+-- Student 3: Omar Mohamed (64-7954)
+CREATE FUNCTION dbo.My_Order_History (@customer_id INT)
+RETURNS TABLE
+AS
+RETURN
+(
+    SELECT
+        O.order_id,
+        O.order_date,
+        Z.zone_name,
+        O.status,
+        COUNT(S.suborder_id) AS number_of_suborders,
+        O.discount_amount,
+        O.total_amount,
+        P.method AS payment_method,
+        P.refunded_amount
+    FROM Orders O
+    INNER JOIN Cart C ON C.cart_id = O.cart_id
+    INNER JOIN Zone Z ON Z.zone_id = O.zone_id
+    LEFT OUTER JOIN SubOrder S ON S.order_id = O.order_id
+    LEFT OUTER JOIN Payment P ON P.order_id = O.order_id
+    WHERE C.customer_id = @customer_id
+    GROUP BY O.order_id, O.order_date, Z.zone_name, O.status, O.discount_amount,
+             O.total_amount, P.method, P.refunded_amount
+);
+GO
+
+-- Student 2: Karim Salah (64-13699)
+CREATE PROCEDURE Toggle_Favorite
+    @customer_id INT,
+    @item_id INT,
+    @item_type VARCHAR(20)
+AS
+BEGIN
+    IF @item_id IS NULL OR @item_type IS NULL OR @item_type NOT IN ('Business', 'Product')
+        RETURN -1;
+
+    IF @item_type = 'Business'
+    BEGIN
+        IF EXISTS (SELECT 1 FROM Favorite_Business WHERE customer_id = @customer_id AND business_id = @item_id)
+        BEGIN
+            DELETE FROM Favorite_Business WHERE customer_id = @customer_id AND business_id = @item_id;
+            RETURN 0;
+        END;
+
+        IF NOT EXISTS (SELECT 1 FROM Business WHERE business_id = @item_id AND status = 'Active')
+            RETURN -4;
+
+        INSERT INTO Favorite_Business (customer_id, business_id)
+        VALUES (@customer_id, @item_id);
+        RETURN 0;
+    END;
+
+    IF EXISTS (SELECT 1 FROM Favorite_Product WHERE customer_id = @customer_id AND product_id = @item_id)
+    BEGIN
+        DELETE FROM Favorite_Product WHERE customer_id = @customer_id AND product_id = @item_id;
+        RETURN 0;
+    END;
+
+    IF NOT EXISTS
+    (
+        SELECT 1
+        FROM Product P
+        INNER JOIN Business B ON B.business_id = P.business_id
+        WHERE P.product_id = @item_id AND P.is_available = 1 AND B.status = 'Active'
+    )
+        RETURN -4;
+
+    INSERT INTO Favorite_Product (customer_id, product_id)
+    VALUES (@customer_id, @item_id);
+    RETURN 0;
+END;
+GO
+
+-- Student 2: Karim Salah (64-13699)
+CREATE FUNCTION dbo.My_Favorites (@customer_id INT)
+RETURNS TABLE
+AS
+RETURN
+(
+    SELECT
+        P.product_id,
+        P.name AS product_name,
+        B.name AS business_name,
+        CAST(CASE WHEN P.is_available = 1 AND B.status = 'Active' THEN 1 ELSE 0 END AS BIT) AS is_orderable
+    FROM Favorite_Product F
+    INNER JOIN Product P ON P.product_id = F.product_id
+    INNER JOIN Business B ON B.business_id = P.business_id
+    WHERE F.customer_id = @customer_id
+);
+GO
+
+-- Student 2: Karim Salah (64-13699) (Helper view: every item each customer has ordered)
+CREATE VIEW Customer_Ordered_Items
+AS
+SELECT C.customer_id, P.product_id, P.category, CI.quantity
+FROM CartItem CI
+INNER JOIN Cart C ON C.cart_id = CI.cart_id
+INNER JOIN Orders O ON O.cart_id = C.cart_id
+INNER JOIN Product P ON P.product_id = CI.product_id;
+GO
+
+-- Student 2: Karim Salah (64-13699)
+CREATE FUNCTION dbo.Recommended_Products (@customer_id INT)
+RETURNS TABLE
+AS
+RETURN
+(
+    SELECT TOP 10
+        P.product_id,
+        P.name AS product_name,
+        B.name AS business_name,
+        P.category,
+        CAST(P.price - P.discount_amount AS DECIMAL(10,2)) AS final_price
+    FROM Product P
+    INNER JOIN Business B ON B.business_id = P.business_id
+    INNER JOIN Address A ON A.zone_id = B.zone_id
+    INNER JOIN Customer_Ordered_Items COI ON COI.category = P.category
+    WHERE A.customer_id = @customer_id
+      AND A.is_active = 1
+      AND B.status = 'Active'
+      AND P.is_available = 1
+      AND COI.customer_id = @customer_id
+      AND P.product_id NOT IN (SELECT product_id FROM Customer_Ordered_Items WHERE customer_id = @customer_id)
+    GROUP BY P.product_id, P.name, B.name, P.category, P.price, P.discount_amount
+    ORDER BY SUM(COI.quantity) DESC, P.product_id
+);
+GO
+
+-- Student 2: Karim Salah (64-13699)
+CREATE FUNCTION dbo.Search_Platform (@customer_id INT, @keyword VARCHAR(100))
+RETURNS TABLE
+AS
+RETURN
+(
+    SELECT
+        B.business_id,
+        B.name AS business_name,
+        CASE
+            WHEN B.name = @keyword THEN 1
+            WHEN B.name LIKE @keyword + '%' THEN 2
+            ELSE 3
+        END AS priority
+    FROM Business B
+    INNER JOIN Address A ON A.zone_id = B.zone_id
+    WHERE A.customer_id = @customer_id
+      AND A.is_active = 1
+      AND B.status = 'Active'
+      AND @keyword <> ''
+      AND B.name LIKE '%' + @keyword + '%'
+);
+GO
+
+-- Student 2: Karim Salah (64-13699) (Helper view: average tracking_time of Delivered deliveries per zone)
+CREATE VIEW Zone_Avg_Delivery_Time
+AS
+SELECT
+    O.zone_id,
+    CAST(AVG(CAST(D.tracking_time AS DECIMAL(10,2))) AS DECIMAL(10,2)) AS avg_delivery_time
+FROM Delivery D
+INNER JOIN SubOrder S ON S.suborder_id = D.suborder_id
+INNER JOIN Orders O ON O.order_id = S.order_id
+WHERE S.status = 'Delivered'
+GROUP BY O.zone_id;
+GO
+
+-- Student 2: Karim Salah (64-13699)
+CREATE FUNCTION dbo.Nearby_Businesses_By_Category (@address_id INT, @product_category VARCHAR(50))
+RETURNS TABLE
+AS
+RETURN
+(
+    SELECT
+        B.business_id,
+        B.name AS business_name,
+        Z.zone_name,
+        CAST(CASE WHEN B.zone_id = A.zone_id THEN 1 ELSE 0 END AS BIT) AS same_zone,
+        V.avg_delivery_time AS zone_avg_delivery_time
+    FROM Business B
+    INNER JOIN Zone Z ON Z.zone_id = B.zone_id
+    INNER JOIN Address A ON A.address_id = @address_id
+    LEFT OUTER JOIN Zone_Avg_Delivery_Time V ON V.zone_id = B.zone_id
+    WHERE B.status = 'Active'
+      AND EXISTS
+      (
+          SELECT 1
+          FROM Product P
+          WHERE P.business_id = B.business_id
+            AND P.category = @product_category
+            AND P.is_available = 1
+      )
 );
 GO
