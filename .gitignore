@@ -1,6 +1,0 @@
-.env
-.venv/
-build/
-__pycache__/
-*_results.txt
-.DS_Store
