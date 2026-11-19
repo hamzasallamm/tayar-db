@@ -371,6 +371,7 @@ BEGIN
     DROP FUNCTION Platform_Health_Snapshot;
     DROP FUNCTION Validate_New_User;
     DROP FUNCTION Cancellable_Orders;
+    DROP FUNCTION Detect_Voucher_Abuse;
 
     DROP PROCEDURE createAllTables;
     DROP PROCEDURE dropAllTables;
@@ -1211,6 +1212,24 @@ as begin
     end catch;
     return 0;
 end;
+GO
+
+-- Detect_Voucher_Abuse is listed under Student 1 in the Work Split (Section 5) but is not described in Section 4,
+-- so this is our own version: customers with at least @min_cancellations cancelled orders that used a voucher
+-- (cancelling an order gives the voucher back, so it can be used again on a new order).
+-- Student 1: Hamza Sallam (64-5469)
+create function dbo.Detect_Voucher_Abuse(@min_cancellations int)
+returns table as
+return(
+    select c.customer_id, u.first_name + ' ' + u.last_name as customer_name, u.account_status,
+    count(o.order_id) as cancelled_voucher_orders
+    from Orders o
+    inner join Cart c on c.cart_id = o.cart_id
+    inner join Users u on u.user_id = c.customer_id
+    where o.status = 'Cancelled' and o.discount_amount > 0 and @min_cancellations >= 1
+    group by c.customer_id, u.first_name, u.last_name, u.account_status
+    having count(o.order_id) >= @min_cancellations
+);
 GO
 
 -- Student 4: Youssef Elbeltagy (64-12228)
