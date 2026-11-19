@@ -368,6 +368,7 @@ BEGIN
     DROP FUNCTION Nearby_Businesses_By_Category;
     DROP FUNCTION Platform_Health_Snapshot;
     DROP FUNCTION Validate_New_User;
+    DROP FUNCTION Cancellable_Orders;
 
     DROP PROCEDURE createAllTables;
     DROP PROCEDURE dropAllTables;
@@ -1050,6 +1051,49 @@ as begin
 
     insert into Voucher (promo_code, is_percentage, amount, expiry_date, customer_id)
     values (@promo_code, @is_percentage, @amount, @expiry_date, @customer_id);
+    return 0;
+end;
+GO
+
+--Student 1: Hamza Sallam (64-5469) (Helper function)
+create function dbo.Cancellable_Orders(@customer_id int)
+returns table as return(select o.order_id from orders o
+inner join cart c on c.cart_id = o.cart_id where
+c.customer_id = @customer_id and o.status <> 'Cancelled' and not exists(
+    select 1 from suborder s where s.order_id = o.order_id and (s.status = 'Picked Up' or s.status = 'Delivered')
+));
+GO
+
+--Student 1: Hamza Sallam (64-5469)
+create procedure Blacklist_Customer(@customer_id int, @admin_id int, @reason varchar(255))
+as begin
+    declare @refund decimal(10,2);
+    if @reason is null or @reason = ''
+        return -1;
+    if not exists(select 1 from admin a where a.admin_id = @admin_id and (a.role = 'Super Admin' or (a.role = 'Zone Admin' and a.zone_id in (select ad.zone_id from Address ad where ad.customer_id=@customer_id))))
+        return -3;
+    if exists(select 1 from Users where user_id = @customer_id and account_status = 'Blacklisted')
+        return -4;
+    begin try
+        begin transaction;
+        update Users set account_status = 'Blacklisted' where user_id = @customer_id;
+        insert into Blacklist (customer_id, admin_id, reason) values (@customer_id, @admin_id, @reason);
+        select @refund = sum(p.amount - p.refunded_amount) from payment p
+        where p.method <> 'Cash' and p.order_id in (select order_id from dbo.Cancellable_Orders(@customer_id));
+        if @refund is not null
+            update Customer set wallet_balance=wallet_balance+ @refund where customer_id=@customer_id;
+        update payment set refunded_amount=amount where order_id in (select order_id from dbo.Cancellable_Orders(@customer_id));
+        update voucher set status='Unused' where voucher_id in (select o.voucher_id from orders o where o.order_id in (select order_id from dbo.Cancellable_Orders(@customer_id)));
+        update orders set voucher_id=null where order_id in (select order_id from dbo.Cancellable_Orders(@customer_id));
+        update suborder set status='Cancelled' where order_id in (select order_id from dbo.Cancellable_Orders(@customer_id));
+        update orders set status='Cancelled' where order_id in (select order_id from dbo.Cancellable_Orders(@customer_id));
+        delete from voucher where customer_id=@customer_id and status='Unused';
+        commit transaction;
+    end try
+    begin catch
+        rollback transaction;
+        return -1;
+    end catch;
     return 0;
 end;
 GO
