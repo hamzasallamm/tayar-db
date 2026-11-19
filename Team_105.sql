@@ -405,6 +405,7 @@ BEGIN
     DROP PROCEDURE Checkout_Cart;
     DROP PROCEDURE Cancel_Order;
     DROP PROCEDURE Reorder;
+    DROP PROCEDURE Recompute_Order_Status;
     DROP PROCEDURE Submit_Feedback;
     DROP PROCEDURE Rate_Rider;
     DROP PROCEDURE Toggle_Favorite;
@@ -476,6 +477,18 @@ LEFT JOIN Business B
 GROUP BY Z.zone_id, Z.zone_name;
 GO
 
+-- Student 5: NourEldin (65-33048)
+CREATE VIEW BusinessRatingsSummary AS
+SELECT b.business_id,
+       b.name AS business_name,
+       CAST(AVG(CAST(f.rating AS decimal(10,2))) AS decimal(10,2)) AS avg_rating,
+       COUNT(f.feedback_id) AS ratings_count
+FROM Business b
+LEFT JOIN SubOrder s ON s.business_id = b.business_id
+LEFT JOIN Feedback f ON f.suborder_id = s.suborder_id
+GROUP BY b.business_id, b.name;
+GO
+
 -- Student 1: Hamza Sallam (64-5469)
 create view ActiveVouchers as
 select v.voucher_id, v.promo_code, v.customer_id, v.is_percentage, v.amount, v.expiry_date
@@ -489,6 +502,21 @@ AS
 SELECT business_id, business_name, business_type, zone_name, partner_name
 FROM allBusinessProfiles
 WHERE status = 'Pending';
+GO
+
+-- Student 5: NourEldin (65-33048)
+CREATE VIEW RiderPerformanceSummary AS
+SELECT r.rider_id,
+       u.first_name + ' ' + u.last_name AS rider_name,
+       z.zone_name,
+       COUNT(s.suborder_id) AS completed_deliveries,
+       CAST(AVG(CASE WHEN s.status = 'Delivered' THEN CAST(d.rider_rating AS decimal(10,2)) END) AS decimal(10,2)) AS avg_rating
+FROM Rider r
+INNER JOIN Users u ON u.user_id = r.rider_id
+INNER JOIN Zone z ON z.zone_id = r.zone_id
+LEFT JOIN Delivery d ON d.rider_id = r.rider_id
+LEFT JOIN SubOrder s ON s.suborder_id = d.suborder_id AND s.status = 'Delivered'
+GROUP BY r.rider_id, u.first_name, u.last_name, z.zone_name;
 GO
 
 -- Student 2: Karim Salah (64-13699)
@@ -509,6 +537,19 @@ INNER JOIN allBusinessProfiles A ON A.business_id = P.business_id
 WHERE S.status <> 'Cancelled'
 GROUP BY P.product_id, P.name, A.business_name, A.business_type
 ORDER BY units_sold DESC, P.product_id;
+GO
+
+-- Student 5: NourEldin (65-33048)
+CREATE VIEW ZoneDeliveryPerformance AS
+SELECT z.zone_id,
+       z.zone_name,
+       COUNT(d.delivery_id) AS delivery_count,
+       CAST(AVG(CAST(d.tracking_time AS decimal(10,2))) AS decimal(10,2)) AS avg_tracking_time
+FROM Zone z
+LEFT JOIN Orders o ON o.zone_id = z.zone_id
+LEFT JOIN SubOrder s ON s.order_id = o.order_id AND s.status = 'Delivered'
+LEFT JOIN Delivery d ON d.suborder_id = s.suborder_id
+GROUP BY z.zone_id, z.zone_name;
 GO
 
 -- Student 1: Hamza Sallam (64-5469)
@@ -1220,6 +1261,27 @@ RETURN
 );
 GO
 
+-- Student 5: NourEldin (65-33048)
+CREATE FUNCTION TopRiders (@from_date date, @to_date date)
+RETURNS TABLE
+AS
+RETURN (
+    SELECT TOP 5
+           CAST(ROW_NUMBER() OVER (ORDER BY COUNT(d.delivery_id) DESC, d.rider_id ASC) AS int) AS rider_rank,
+           d.rider_id,
+           u.first_name + ' ' + u.last_name AS rider_name,
+           COUNT(d.delivery_id) AS completed_delivery_count
+    FROM Delivery d
+    INNER JOIN SubOrder s ON s.suborder_id = d.suborder_id
+    INNER JOIN Users u ON u.user_id = d.rider_id
+    WHERE s.status = 'Delivered'
+      AND @from_date <= @to_date
+      AND CAST(d.delivered_at AS date) BETWEEN @from_date AND @to_date
+    GROUP BY d.rider_id, u.first_name, u.last_name
+    ORDER BY completed_delivery_count DESC, d.rider_id ASC
+);
+GO
+
 -- Student 4: Youssef Elbeltagy (64-12228)
 CREATE FUNCTION Daily_Revenue_Report
 (
@@ -1493,6 +1555,26 @@ RETURN
       AND S.status <> 'Cancelled'
       AND CAST(O.order_date AS DATE) BETWEEN @from_date AND @to_date
     GROUP BY P.product_id, P.name
+);
+GO
+
+-- Student 5: NourEldin (65-33048)
+CREATE FUNCTION BusinessFeedbackOverview (@business_id int)
+RETURNS TABLE
+AS
+RETURN (
+    SELECT CAST(AVG(CAST(f.rating AS decimal(10,2))) AS decimal(10,2)) AS avg_rating,
+           COUNT(f.feedback_id) AS number_of_feedbacks,
+           ISNULL(SUM(CASE WHEN f.rating = 5 THEN 1 ELSE 0 END), 0) AS five_star,
+           ISNULL(SUM(CASE WHEN f.rating = 4 THEN 1 ELSE 0 END), 0) AS four_star,
+           ISNULL(SUM(CASE WHEN f.rating = 3 THEN 1 ELSE 0 END), 0) AS three_star,
+           ISNULL(SUM(CASE WHEN f.rating = 2 THEN 1 ELSE 0 END), 0) AS two_star,
+           ISNULL(SUM(CASE WHEN f.rating = 1 THEN 1 ELSE 0 END), 0) AS one_star
+    FROM Business b
+    LEFT JOIN SubOrder s ON s.business_id = b.business_id
+    LEFT JOIN Feedback f ON f.suborder_id = s.suborder_id
+    WHERE b.business_id = @business_id
+    GROUP BY b.business_id
 );
 GO
 
@@ -2104,6 +2186,59 @@ BEGIN
 END;
 GO
 
+-- Student 5: NourEldin (65-33048)
+CREATE PROCEDURE Submit_Feedback
+    @suborder_id int,
+    @headline varchar(100),
+    @description varchar(500),
+    @rating int
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @status varchar(20);
+
+    IF @suborder_id IS NULL OR @rating IS NULL OR @rating NOT BETWEEN 1 AND 5
+       OR @headline IS NULL OR LTRIM(RTRIM(@headline)) = ''
+        RETURN -1;
+
+    SELECT @status = status FROM SubOrder WHERE suborder_id = @suborder_id;
+    IF @status IS NULL RETURN -1;
+    IF @status <> 'Delivered' RETURN -4;
+    IF EXISTS (SELECT 1 FROM Feedback WHERE suborder_id = @suborder_id) RETURN -2;
+
+    INSERT INTO Feedback (headline, description, rating, suborder_id)
+    VALUES (@headline, @description, @rating, @suborder_id);
+
+    RETURN 0;
+END
+GO
+
+-- Student 5: NourEldin (65-33048)
+CREATE PROCEDURE Rate_Rider
+    @suborder_id int,
+    @rider_rating int
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @status varchar(20), @existing int, @delivery_id int;
+
+    IF @suborder_id IS NULL OR @rider_rating IS NULL OR @rider_rating NOT BETWEEN 1 AND 5
+        RETURN -1;
+
+    SELECT @status = s.status, @existing = d.rider_rating, @delivery_id = d.delivery_id
+    FROM SubOrder s
+    LEFT JOIN Delivery d ON d.suborder_id = s.suborder_id
+    WHERE s.suborder_id = @suborder_id;
+
+    IF @status IS NULL OR @delivery_id IS NULL RETURN -1;
+    IF @status <> 'Delivered' RETURN -4;
+    IF @existing IS NOT NULL RETURN -2;
+
+    UPDATE Delivery SET rider_rating = @rider_rating WHERE delivery_id = @delivery_id;
+    RETURN 0;
+END
+GO
+
 -- Student 3: Omar Mohamed (64-7954)
 CREATE FUNCTION dbo.My_Order_History (@customer_id INT)
 RETURNS TABLE
@@ -2233,6 +2368,198 @@ RETURN
 );
 GO
 
+-- Student 5: NourEldin (65-33048)
+CREATE PROCEDURE Set_Rider_Availability
+    @rider_id int,
+    @is_available bit
+AS
+BEGIN
+    SET NOCOUNT ON;
+    IF @is_available IS NULL RETURN -1;
+    IF @rider_id IS NULL OR NOT EXISTS (SELECT 1 FROM Rider WHERE rider_id = @rider_id)
+        RETURN -3;
+
+    UPDATE Rider SET is_available = @is_available WHERE rider_id = @rider_id;
+    RETURN 0;
+END
+GO
+
+-- Student 5: NourEldin (65-33048)
+CREATE FUNCTION My_Active_Deliveries (@rider_id int)
+RETURNS TABLE
+AS
+RETURN (
+    SELECT d.delivery_id,
+           o.order_id,
+           s.suborder_id,
+           b.name AS business_name,
+           u.first_name + ' ' + u.last_name AS customer_name,
+           a.description AS address_description,
+           z.zone_name,
+           s.status,
+           d.assigned_at
+    FROM Delivery d
+    INNER JOIN SubOrder s ON s.suborder_id = d.suborder_id
+    INNER JOIN Orders o ON o.order_id = s.order_id
+    INNER JOIN Business b ON b.business_id = s.business_id
+    INNER JOIN Cart c ON c.cart_id = o.cart_id
+    INNER JOIN Users u ON u.user_id = c.customer_id
+    INNER JOIN Address a ON a.address_id = c.address_id
+    INNER JOIN Zone z ON z.zone_id = o.zone_id
+    WHERE d.rider_id = @rider_id
+      AND s.status IN ('Assigned', 'Picked Up')
+);
+GO
+
+-- Student 5: NourEldin (65-33048) (Helper procedure: recomputes the order status, BR-11)
+CREATE PROCEDURE Recompute_Order_Status
+    @order_id int
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @total int, @cancelled int, @delivered int, @started int, @new_status varchar(20);
+
+    SELECT @total     = COUNT(*),
+           @cancelled = ISNULL(SUM(CASE WHEN status = 'Cancelled' THEN 1 ELSE 0 END), 0),
+           @delivered = ISNULL(SUM(CASE WHEN status = 'Delivered' THEN 1 ELSE 0 END), 0),
+           @started   = ISNULL(SUM(CASE WHEN status IN ('Picked Up', 'Delivered') THEN 1 ELSE 0 END), 0)
+    FROM SubOrder
+    WHERE order_id = @order_id;
+
+    IF @total = 0 RETURN 0;
+
+    IF @cancelled = @total
+        SET @new_status = 'Cancelled';
+    ELSE IF @delivered = @total - @cancelled
+        SET @new_status = 'Delivered';
+    ELSE IF @started > 0
+        SET @new_status = 'In Progress';
+    ELSE
+        SET @new_status = 'Placed';
+
+    UPDATE Orders SET status = @new_status WHERE order_id = @order_id;
+    RETURN 0;
+END
+GO
+
+-- Student 5: NourEldin (65-33048)
+CREATE PROCEDURE Mark_Picked_Up
+    @delivery_id int
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    DECLARE @suborder_id int, @order_id int, @status varchar(20);
+
+    SELECT @suborder_id = s.suborder_id, @order_id = s.order_id, @status = s.status
+    FROM Delivery d
+    INNER JOIN SubOrder s ON s.suborder_id = d.suborder_id
+    WHERE d.delivery_id = @delivery_id;
+
+    IF @suborder_id IS NULL RETURN -1;
+    IF @status <> 'Assigned' RETURN -4;
+
+    BEGIN TRAN;
+        UPDATE SubOrder SET status = 'Picked Up' WHERE suborder_id = @suborder_id;
+        UPDATE Delivery SET picked_up_at = GETDATE() WHERE delivery_id = @delivery_id;
+        EXEC Recompute_Order_Status @order_id;
+    COMMIT TRAN;
+
+    RETURN 0;
+END
+GO
+
+-- Student 5: NourEldin (65-33048)
+CREATE PROCEDURE Mark_Delivered
+    @delivery_id int
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    DECLARE @suborder_id int, @order_id int, @status varchar(20), @now datetime = GETDATE();
+
+    SELECT @suborder_id = s.suborder_id, @order_id = s.order_id, @status = s.status
+    FROM Delivery d
+    INNER JOIN SubOrder s ON s.suborder_id = d.suborder_id
+    WHERE d.delivery_id = @delivery_id;
+
+    IF @suborder_id IS NULL RETURN -1;
+    IF @status <> 'Picked Up' RETURN -4;
+
+    BEGIN TRAN;
+        UPDATE SubOrder SET status = 'Delivered' WHERE suborder_id = @suborder_id;
+        UPDATE Delivery
+        SET delivered_at = @now,
+            tracking_time = DATEDIFF(MINUTE, picked_up_at, @now)
+        WHERE delivery_id = @delivery_id;
+        EXEC Recompute_Order_Status @order_id;
+    COMMIT TRAN;
+
+    RETURN 0;
+END
+GO
+
+-- Student 5: NourEldin (65-33048)
+CREATE FUNCTION My_Earnings (@rider_id int, @from_date date, @to_date date)
+RETURNS TABLE
+AS
+RETURN (
+    SELECT COUNT(s.suborder_id) AS completed_deliveries,
+           CAST(ISNULL(SUM(s.delivery_fee), 0) AS decimal(10,2)) AS total_delivery_fees,
+           CAST(ISNULL(SUM(s.delivery_fee), 0) * 0.80 AS decimal(10,2)) AS total_earnings
+    FROM Rider r
+    LEFT JOIN Delivery d ON d.rider_id = r.rider_id
+        AND CAST(d.delivered_at AS date) BETWEEN @from_date AND @to_date
+    LEFT JOIN SubOrder s ON s.suborder_id = d.suborder_id AND s.status = 'Delivered'
+    WHERE r.rider_id = @rider_id
+      AND @from_date IS NOT NULL AND @to_date IS NOT NULL AND @from_date <= @to_date
+    GROUP BY r.rider_id
+);
+GO
+
+-- Student 5: NourEldin (65-33048)
+CREATE FUNCTION My_Rating_Summary (@rider_id int)
+RETURNS TABLE
+AS
+RETURN (
+    SELECT CAST(AVG(CAST(d.rider_rating AS decimal(10,2))) AS decimal(10,2)) AS avg_rating,
+           COUNT(d.rider_rating) AS ratings_count,
+           ISNULL(SUM(CASE WHEN d.rider_rating = 5 THEN 1 ELSE 0 END), 0) AS five_star,
+           ISNULL(SUM(CASE WHEN d.rider_rating = 4 THEN 1 ELSE 0 END), 0) AS four_star,
+           ISNULL(SUM(CASE WHEN d.rider_rating = 3 THEN 1 ELSE 0 END), 0) AS three_star,
+           ISNULL(SUM(CASE WHEN d.rider_rating = 2 THEN 1 ELSE 0 END), 0) AS two_star,
+           ISNULL(SUM(CASE WHEN d.rider_rating = 1 THEN 1 ELSE 0 END), 0) AS one_star
+    FROM Rider r
+    LEFT JOIN Delivery d ON d.rider_id = r.rider_id
+    WHERE r.rider_id = @rider_id
+    GROUP BY r.rider_id
+);
+GO
+
+-- Student 5: NourEldin (65-33048)
+CREATE FUNCTION My_Delivery_History (@rider_id int, @from_date date, @to_date date)
+RETURNS TABLE
+AS
+RETURN (
+    SELECT d.delivery_id,
+           o.order_id,
+           b.name AS business_name,
+           s.status,
+           d.assigned_at,
+           d.picked_up_at,
+           d.delivered_at,
+           d.tracking_time
+    FROM Delivery d
+    INNER JOIN SubOrder s ON s.suborder_id = d.suborder_id
+    INNER JOIN Orders o ON o.order_id = s.order_id
+    INNER JOIN Business b ON b.business_id = s.business_id
+    WHERE d.rider_id = @rider_id
+      AND s.status IN ('Delivered', 'Cancelled')
+      AND @from_date <= @to_date
+      AND CAST(d.assigned_at AS date) BETWEEN @from_date AND @to_date
+);
+GO
+
 -- Student 2: Karim Salah (64-13699)
 CREATE FUNCTION dbo.Search_Platform (@customer_id INT, @keyword VARCHAR(100))
 RETURNS TABLE
@@ -2254,6 +2581,28 @@ RETURN
       AND B.status = 'Active'
       AND @keyword <> ''
       AND B.name LIKE '%' + @keyword + '%'
+);
+GO
+
+-- Student 5: NourEldin (65-33048)
+CREATE FUNCTION Reconcile_Order_Totals ()
+RETURNS TABLE
+AS
+RETURN (
+    SELECT o.order_id,
+           CAST(ISNULL(x.sub_sum, 0) - o.discount_amount AS decimal(10,2)) AS expected_total,
+           o.total_amount AS order_total,
+           p.amount AS payment_amount
+    FROM Orders o
+    LEFT JOIN (
+        SELECT order_id, SUM(total_price + delivery_fee) AS sub_sum
+        FROM SubOrder
+        GROUP BY order_id
+    ) x ON x.order_id = o.order_id
+    LEFT JOIN Payment p ON p.order_id = o.order_id
+    WHERE ISNULL(x.sub_sum, 0) - o.discount_amount <> o.total_amount
+       OR p.payment_id IS NULL
+       OR p.amount <> o.total_amount
 );
 GO
 
@@ -2295,5 +2644,24 @@ RETURN
             AND P.category = @product_category
             AND P.is_available = 1
       )
+);
+GO
+
+-- Student 5: NourEldin (65-33048)
+CREATE FUNCTION Platform_Health_Snapshot ()
+RETURNS TABLE
+AS
+RETURN (
+    SELECT
+        (SELECT COUNT(*) FROM Business WHERE status = 'Active') AS active_businesses,
+        (SELECT COUNT(*) FROM Rider r INNER JOIN Users u ON u.user_id = r.rider_id WHERE r.is_available = 1 AND u.account_status = 'Active') AS available_riders,
+        (SELECT COUNT(*) FROM Orders WHERE CAST(order_date AS date) = CAST(GETDATE() AS date)) AS orders_today,
+        (SELECT CAST(AVG(CAST(tracking_time AS decimal(10,2))) AS decimal(10,2))
+         FROM Delivery
+         WHERE tracking_time IS NOT NULL
+           AND CAST(delivered_at AS date) = CAST(GETDATE() AS date)) AS avg_delivery_time_today,
+        (SELECT COUNT(*) FROM Feedback
+         WHERE rating <= 2
+           AND CAST(feedback_date AS date) = CAST(GETDATE() AS date)) AS low_ratings_today
 );
 GO
