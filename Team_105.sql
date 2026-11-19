@@ -713,9 +713,9 @@ as begin
     update Business set status = 'Rejected' where business_id = @business_id;
     return 0;
 end;
-GO
-    
+GO   
 
+    
 
 -- Student 4: Youssef Elbeltagy (64-12228)
 CREATE PROCEDURE Suspend_Business
@@ -892,6 +892,7 @@ BEGIN
 END;
 GO
 
+
 -- Student 4: Youssef Elbeltagy (64-12228)
 CREATE PROCEDURE Reinstate_Business
     @business_id INT,
@@ -1012,6 +1013,67 @@ BEGIN
 
     RETURN 0;
 END;
+GO
+
+-- Student 1: Hamza Sallam (64-5469)
+create procedure Assign_Admin_Zone(@admin_id int, @zone_id int, @super_admin_id int)
+as begin
+    if not exists(select 1 from Admin where admin_id=@super_admin_id and role = 'Super Admin')
+        return -3;
+    if not exists(select 1 from Admin where admin_id=@admin_id and role = 'Zone Admin')
+        return -1;
+    if not exists(select 1 from Zone where zone_id=@zone_id)
+        return -1;
+    update Admin set zone_id = @zone_id where admin_id = @admin_id;
+    return 0;
+end;
+GO
+
+-- Student 1: Hamza Sallam (64-5469)
+create procedure Issue_Voucher(@customer_id int, @promo_code varchar(30), @is_percentage bit, @amount decimal(10,2),
+@expiry_date date, @admin_id int)
+as begin
+    if not exists(select 1 from Admin where admin_id = @admin_id)
+        return -3;
+
+    if @promo_code is null or @promo_code = '' or @is_percentage is null or @amount is null or @amount <= 0
+       or @expiry_date is null or @expiry_date < cast(getdate() as date)
+        return -1;
+    if @is_percentage = 1 and (@amount < 1 or @amount > 100)
+        return -1;
+
+    if exists(select 1 from Users where user_id = @customer_id and account_status = 'Blacklisted')
+        return -3;
+
+    if exists(select 1 from Voucher where promo_code = @promo_code)
+        return -2;
+
+    insert into Voucher (promo_code, is_percentage, amount, expiry_date, customer_id)
+    values (@promo_code, @is_percentage, @amount, @expiry_date, @customer_id);
+    return 0;
+end;
+GO
+
+--Student 1: Hamza Sallam (64-5469)
+create procedure Lift_Customer_Blacklist(@customer_id int, @admin_id int)
+as begin
+    if not exists(select 1 from Blacklist where customer_id = @customer_id)
+        return -4;
+    if not exists(select 1 from Blacklist where customer_id = @customer_id and admin_id = @admin_id)
+        return -3;
+    
+    begin try
+    begin transaction;
+        update Users set account_status = 'Active' where user_id = @customer_id;
+        delete from Blaclist where customer_id=@customer_id;
+    commit transaction;
+    end try
+    begin catch
+        rollback transaction;
+        return -1;
+    end catch;
+    return 0;
+end;
 GO
 
 -- Student 4: Youssef Elbeltagy (64-12228)
